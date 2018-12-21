@@ -110,12 +110,10 @@ Resources:
             - allow-all
             - redirect-to-https
           TargetOriginId: Bucket
-          LambdaFunctionAssociation:
-            - EventType: origin-request
-            - LambdaFunctionARN: !Join
-              - ":"
-              - - !Ref DefaultDirectoryIndexLambda
-                - !GetAtt DefaultDirectoryIndexLambdaV1.Version
+          LambdaFunctionAssociations:
+              -
+                EventType: origin-request
+                LambdaFunctionARN: !Sub ${DefaultDirectoryIndexLambda.Arn}:${DefaultDirectoryIndexLambdaV1.Version}
         Origins:
           - Id: Bucket
             DomainName: !GetAtt RemixWebBucket.DomainName
