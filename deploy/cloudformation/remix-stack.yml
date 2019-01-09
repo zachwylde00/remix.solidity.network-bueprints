@@ -13,6 +13,14 @@ Parameters:
     NoEcho: true
     Description: An oAuth token with access to the Remix repository
 
+  SourceRepoOwner:
+    Type: String
+    Description: The owner of the repository in Github
+
+  SourceRepoName:
+    Type: String
+    Description: The name of the repository in Github
+
   RemixCertificateArn:
     Type: String
     Description: The ARN of the SSL Certificate for Remix
@@ -57,7 +65,6 @@ Resources:
 
   RemixWebBucketPolicy:
     Type: AWS::S3::BucketPolicy
-    DependsOn: OriginAccessIdentity
     Properties:
       Bucket: !Ref RemixWebBucket
       PolicyDocument:
@@ -75,7 +82,6 @@ Resources:
 
   RemixDistribution:
     Type: AWS::CloudFront::Distribution
-    DependsOn: OriginAccessIdentity
     Properties:
       DistributionConfig:
         Enabled: true
@@ -219,6 +225,46 @@ Resources:
                       -
                         - !GetAtt RemixWebBucket.Arn
                         - "/*"
+        -
+          PolicyName: "ReadEsuParameters"
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              -   Effect: Allow
+                  Action:
+                  -   ssm:DescribeParameters
+                  Resource: '*'
+              -   Effect: Allow
+                  Action:
+                  -   ssm:GetParameterHistory
+                  -   ssm:GetParametersByPath
+                  -   ssm:GetParameters
+                  -   ssm:GetParameter
+                  Resource:
+                     Fn::Join:
+                     - ""
+                     -
+                      - "arn:aws:ssm:"
+                      -
+                        Ref: "AWS::Region"
+                      - ":"
+                      -
+                        Ref: "AWS::AccountId"
+                      - ":parameter/esu/*"
+              -   Effect: Allow
+                  Action:
+                  -   kms:Decrypt
+                  Resource:
+                    Fn::Join:
+                    - ""
+                    -
+                      - "arn:aws:kms:"
+                      -
+                        Ref: "AWS::Region"
+                      - ":"
+                      -
+                        Ref: "AWS::AccountId"
+                      - ":key/CMK"
 
 
   RemixBuilder:
@@ -238,10 +284,12 @@ Resources:
             post_build:
               commands:
                 - aws s3 cp --recursive ./ s3://$DEST_BUCKET/ --exclude "./Jenkinsfile" --exclude "./README.md"
+                - printf $CODEBUILD_RESOLVED_SOURCE_VERSION > ${BuildOutputDir}/sha.txt
           artifacts:
             type: zip
             files:
               - ./index.html
+              - ./sha.txt
       Artifacts:
         Type: CODEPIPELINE
       Environment:
@@ -252,6 +300,43 @@ Resources:
           - Name: DEST_BUCKET
             Value: !Ref RemixWebBucket
 
+  PostDeployGitHub:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: add_github_status
+      Description: 'CodeBuild to tag the latest commit in repo post-deploy'
+      ServiceRole: !Ref RemixCodeBuildRole
+      TimeoutInMinutes: 10
+      Source:
+        Type: CODEPIPELINE
+        GitCloneDepth: 1
+        BuildSpec: |
+          version: 0.2
+          phases:
+            pre_build:
+              commands:
+                - echo Pre-build started on `date`
+            build:
+              commands:
+                - SOURCE_SHA=$(cat sha.txt)
+                - DATE=$(date)
+            post_build:
+              commands:
+                - curl -i -X POST -H "Authorization:token ${OAUTH_TOKEN}" "${API_URL}/${SOURCE_SHA}" -d "{\"state\":\"success\",\"description\":\"Deployed to production on ${DATE}\",\"context\":\"${CODEBUILD_INITIATOR}\",\"target_url\":\"https://${TARGET_URL}\"}"
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/ubuntu-base:14.04
+        EnvironmentVariables:
+          - Name: OAUTH_TOKEN
+            Type: PARAMETER_STORE
+            Value: /esu/github/ndlib-git/oauth
+          - Name: API_URL
+            Value: !Sub "https://api.github.com/repos/${SourceRepoOwner}/${SourceRepoName}/statuses"
+          - Name: TARGET_URL
+            Value: !Ref FQDN
 
   RemixCodeS3Bucket:
     Type: AWS::S3::Bucket
@@ -361,6 +446,20 @@ Resources:
                 Version: "1"
               Configuration:
                 ProjectName: !Ref RemixBuilder
+              RunOrder: 1
+            -
+              Name: "UpdateGitHubStatus"
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Version: '1'
+                Provider: CodeBuild
+              InputArtifacts:
+                - Name: BuiltCode
+              Configuration:
+                ProjectName: !Ref PostDeployGitHub
+              RunOrder: 2
+
   # Creates a role that allows lambda basic execution, but can be assumed
   # by edge services.
   # Reference https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/lambda-edge-permissions.html
