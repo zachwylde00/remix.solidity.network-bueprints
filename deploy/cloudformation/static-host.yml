@@ -1,0 +1,226 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+
+
+Description: 'Static host for webcomponents and single-page applications'
+
+
+Parameters:
+
+  InfrastructureStackName:
+    Type: String
+    Default: remix-app-infrastructure
+    Description: The name of the parent infrastructure/networking stack that you created. Necessary
+                 to locate and reference resources created by that stack.
+
+  AcmCertificateArn:
+    Type: String
+    Description: Arn for ACM Certificate
+    Default: ''
+
+  FQDN:
+    Type: String
+    Description: DNS name for the website to publish
+    MaxLength: 63
+    AllowedPattern: ^$|(?!-)[a-zA-Z0-9-.]{1,63}(?<!-)
+    ConstraintDescription: must be a valid DNS zone name
+    Default: ''
+
+  EnvType:
+    Type: String
+    Description: The type of environment to create.
+    Default: dev
+    AllowedValues:
+      - dev
+      - prod
+    ConstraintDescription: must specify prod or dev.
+
+Mappings:
+  CacheSettings:
+    dev:
+      DefaultTTL: 0
+    prod:
+      DefaultTTL: 86400
+
+Conditions:
+
+  NoFQDN: !Equals
+    - !Ref FQDN
+    - ''
+
+  NoSSL: !Equals
+    - !Ref AcmCertificateArn
+    - ''
+
+Outputs:
+
+  BucketName:
+    Description: Name of S3 bucket to hold website content
+    Value: !Ref Bucket
+    Export:
+      Name: !Join [ ':', [ !Ref 'AWS::StackName', 'BucketName']]
+
+  URL:
+    Description: The FQDN if one is given, otherwise the cloudfront distribution domain name.
+    Value: !If
+      - NoFQDN
+      - !GetAtt Distribution.DomainName
+      - !Ref FQDN
+    Export:
+      Name: !Join [ ':', [ !Ref 'AWS::StackName', 'URL']]
+
+  DistributionDomainName:
+    Description: The cloudfront distribution domain name.
+    Value: !GetAtt Distribution.DomainName
+
+Resources:
+
+  OriginAccessIdentity:
+    Type: AWS::CloudFront::CloudFrontOriginAccessIdentity
+    Properties:
+      CloudFrontOriginAccessIdentityConfig:
+        Comment: !Sub Static assets in ${AWS::StackName}
+
+  Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      LoggingConfiguration:
+        DestinationBucketName:
+          Fn::ImportValue: !Join [':', [!Ref InfrastructureStackName, 'LogBucket']]
+        LogFilePrefix: !If
+          - NoFQDN
+          - !Sub s3/${AWS::StackName}/
+          - !Sub s3/${FQDN}/
+
+  BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref Bucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - s3:GetObject
+            Resource: !Sub ${Bucket.Arn}/*
+            Principal:
+              CanonicalUser: !GetAtt OriginAccessIdentity.S3CanonicalUserId
+
+  Distribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        HttpVersion: http2
+        PriceClass: PriceClass_100
+        CustomErrorResponses:
+          - ErrorCode: 404
+            ErrorCachingMinTTL: 3600
+            ResponseCode: 200
+            ResponsePagePath: "/index.html"
+          - ErrorCode: 403
+            ErrorCachingMinTTL: 3600
+            ResponseCode: 200
+            ResponsePagePath: "/index.html"
+        ViewerCertificate: !If
+          - NoSSL
+          - !Ref AWS::NoValue
+          - AcmCertificateArn: !Ref AcmCertificateArn
+            MinimumProtocolVersion: TLSv1.1_2016
+            SslSupportMethod: sni-only
+        Comment: !If
+          - NoFQDN
+          - !Ref AWS::NoValue
+          - !Ref FQDN
+        Aliases: !If
+          - NoFQDN
+          - !Ref AWS::NoValue
+          - - !Ref FQDN
+        DefaultRootObject: index.html
+        DefaultCacheBehavior:
+          ForwardedValues:
+            QueryString: false
+          AllowedMethods:
+            - HEAD
+            - GET
+            - OPTIONS
+          Compress: true
+          DefaultTTL: !FindInMap [CacheSettings, !Ref EnvType, "DefaultTTL"]
+          ViewerProtocolPolicy: !If
+            - NoSSL
+            - allow-all
+            - redirect-to-https
+          TargetOriginId: Bucket
+          LambdaFunctionAssociations:
+              -
+                EventType: origin-request
+                LambdaFunctionARN: !Sub ${DefaultDirectoryIndexLambda.Arn}:${DefaultDirectoryIndexLambdaV1.Version}
+        Origins:
+          - Id: Bucket
+            DomainName: !GetAtt Bucket.DomainName
+            S3OriginConfig:
+              OriginAccessIdentity: !Join
+                - /
+                - - origin-access-identity
+                  - cloudfront
+                  - !Ref OriginAccessIdentity
+        Logging:
+          # This should result in "logbucketname.s3.amazonaws.com", where "logbucketname" is the value from an export
+          # named "InfrastructureStackName:LogBucket"
+          Bucket: !Join
+            - .
+            - - !ImportValue
+                Fn::Join: [':', [!Ref InfrastructureStackName, 'LogBucket']]
+              - s3
+              - !Ref AWS::URLSuffix
+          Prefix: !If
+            - NoFQDN
+            - !Sub web/${AWS::StackName}/
+            - !Sub web/${FQDN}/
+          IncludeCookies: true
+
+  LambdaEdgeBasicExecutionRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: "Allow"
+            Principal:
+              Service:
+                - "lambda.amazonaws.com"
+                - "edgelambda.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Path: "/"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  # Adds / to a request with no extension and redirects directory requests to
+  # the index.html within that directory.
+  # Note: This will not work for directories that have a '.' in the name
+  DefaultDirectoryIndexLambda:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      Code:
+        ZipFile: >
+          'use strict';
+          exports.handler = (event, context, callback) => {
+              var request = event.Records[0].cf.request;
+              var olduri = request.uri;
+              var newuri = olduri.replace(/^.*\/([^.|^\/]+)$/, olduri + '/');
+              newuri = newuri.replace(/\/$/, '\/index.html');
+              request.uri = newuri;
+              return callback(null, request);
+          }
+      Description: Basic rewrite rule to send directory requests such as */ to */index.html
+      Handler: index.handler
+      Role: !GetAtt LambdaEdgeBasicExecutionRole.Arn
+      Runtime: nodejs8.10
+
+  DefaultDirectoryIndexLambdaV1:
+    Type: AWS::Lambda::Version
+    Properties:
+      FunctionName: !Ref DefaultDirectoryIndexLambda
+      Description: Initial version
