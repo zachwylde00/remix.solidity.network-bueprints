@@ -6,18 +6,14 @@
 	},
 	"item": [
 		{
-			"name": "Check home page is up",
+			"name": "remix.nd.edu",
 			"event": [
 				{
 					"listen": "test",
 					"script": {
+						"id": "4755794c-e8d3-4c63-905a-e73fac2fa26b",
 						"exec": [
-							"pm.test(\"Status code is 200\", function () {",
-							"    pm.response.to.have.status(200);",
-							"});",
-							"pm.test(\"Response time is less than 2000ms\", function () {",
-							"    pm.expect(pm.response.responseTime).to.be.below(2000);",
-							"});"
+							""
 						],
 						"type": "text/javascript"
 					}
@@ -41,18 +37,14 @@
 			"response": []
 		},
 		{
-			"name": "Check Media Corps Redirect",
+			"name": "remix.nd.edu/media-corps",
 			"event": [
 				{
 					"listen": "test",
 					"script": {
+						"id": "a421bd59-cbc5-4199-b203-ac02a6d6ce65",
 						"exec": [
-							"pm.test(\"Status code is 200\", function () {",
-							"    pm.response.to.have.status(200);",
-							"});",
-							"pm.test(\"Response time is less than 2000ms\", function () {",
-							"    pm.expect(pm.response.responseTime).to.be.below(2000);",
-							"});"
+							""
 						],
 						"type": "text/javascript"
 					}
@@ -85,10 +77,8 @@
 				{
 					"listen": "test",
 					"script": {
+						"id": "e9512138-56eb-44ec-bb8a-052e00096085",
 						"exec": [
-							"pm.test(\"Status code is 200\", function () {",
-							"    pm.response.to.have.status(200);",
-							"});",
 							"pm.test(\"Redirect location is correct\", function () {",
 							"   pm.response.to.have.header(\"x-cache\");",
 							"   pm.response.to.be.header(\"x-cache\", \"Error from cloudfront\");",
@@ -106,18 +96,45 @@
 					"raw": ""
 				},
 				"url": {
-					"raw": "https://{{WebURL}}/bad-path",
+					"raw": "https://{{WebURL}}/{{$guid}}",
 					"protocol": "https",
 					"host": [
 						"{{WebURL}}"
 					],
 					"path": [
-						"/bad-path"
+						"{{$guid}}"
 					]
 				},
 				"description": "A request to an object that doesn't exist should return a 200 [as it loads the root index page], but should include a specific header value of a CloudFront miss."
 			},
 			"response": []
+		}
+	],
+	"event": [
+		{
+			"listen": "prerequest",
+			"script": {
+				"id": "f92a0e3f-94af-4193-ab0e-9a16d327a2bf",
+				"type": "text/javascript",
+				"exec": [
+					""
+				]
+			}
+		},
+		{
+			"listen": "test",
+			"script": {
+				"id": "825e34e7-0c36-4433-b21c-7857adda82c2",
+				"type": "text/javascript",
+				"exec": [
+					"pm.test(\"Status code is 200\", function () {",
+					"    pm.response.to.have.status(200);",
+					"});",
+					"pm.test(\"Response time is less than 2000ms\", function () {",
+					"    pm.expect(pm.response.responseTime).to.be.below(2000);",
+					"});"
+				]
+			}
 		}
 	]
 }
