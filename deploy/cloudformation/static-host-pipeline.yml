@@ -1,0 +1,695 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  - Creates a CodeBuild Project to pull the GitHub repository,
+  build a yarn package.
+  - Creates a CodePipeline that has a specific CodeBuild associated,
+  which on a merge to master will build the project, push it to
+  a bucket, and deploy it to a test stack.
+  - The scripts that are used at each phase of the CodeBuild are stored in the source repo rather than
+  this file.
+
+
+Parameters:
+  Approvers:
+    Type: String
+    Description: An e-mail address of someone who can approve test environment
+
+  SourceRepoOwner:
+    Type: String
+    Description: The owner of the repository in Github
+
+  SourceRepoName:
+    Type: String
+    Description: The name of the repository in Github
+
+  CDBranchName:
+    Type: String
+    Default: master
+    Description: The name of the branch to watch for continuous deployment
+
+  ConfigurationSourceRepoOwner:
+    Type: String
+    Description: The owner of the repository in Github
+
+  ConfigurationSourceRepoName:
+    Type: String
+    Description: The name of the repository in Github
+
+  ConfigurationCDBranchName:
+    Type: String
+    Default: master
+    Description: The name of the branch to watch for Configuration
+
+  OAuth:
+    Type: String
+    NoEcho: true
+    Description: The OAuth Token Value to connect CodePipeline to GitHub. Passed in at Runtime.
+
+  ProdStackName:
+    Type: String
+    Description: The name of the CloudFormation stack that created the production static host
+
+  TestStackName:
+    Type: String
+    Description: The name of the CloudFormation stack that created the test static host
+
+Outputs:
+
+  PipelineName:
+    Description: The name of the pipeline created by this stack
+    Value: !Ref CodePipeline
+    Export:
+      Name: !Join [ ':', [ !Ref 'AWS::StackName', 'PipelineName']]
+
+Resources:
+  ApproversTopic:
+    Type: AWS::SNS::Topic
+
+  ApproversTopicSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref ApproversTopic
+      Protocol: email
+      Endpoint: !Ref Approvers
+
+  CodeBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: "TrustPolicyAllowCodeBuildToAssume"
+            Effect: "Allow"
+            Principal:
+              Service:
+                - "codebuild.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AWSCodeBuildDeveloperAccess
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryPowerUser
+      Policies:
+        -
+          PolicyName: "AllowCloudWatchLogsForCodeBuild"
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              -
+                Action: logs:*
+                Effect: Allow
+                Resource:
+                  - arn:aws:logs:*:*:log-group:/aws/codebuild/*
+                  - arn:aws:logs:*:*:log-group:/aws/codebuild/*:*:*
+              -
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:PutObject
+                Resource:
+                  - !GetAtt CodeS3Bucket.Arn
+                  - Fn::Join:
+                      - ""
+                      -
+                        - !GetAtt CodeS3Bucket.Arn
+                        - "/*"
+        -
+          PolicyName: "ReadEsuParameters"
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              -   Effect: Allow
+                  Action:
+                  -   ssm:DescribeParameters
+                  Resource: '*'
+              -   Effect: Allow
+                  Action:
+                  -   ssm:GetParameterHistory
+                  -   ssm:GetParametersByPath
+                  -   ssm:GetParameters
+                  -   ssm:GetParameter
+                  Resource:
+                     Fn::Join:
+                     - ""
+                     -
+                      - "arn:aws:ssm:"
+                      -
+                        Ref: "AWS::Region"
+                      - ":"
+                      -
+                        Ref: "AWS::AccountId"
+                      - ":parameter/esu/*"
+              -   Effect: Allow
+                  Action:
+                  -   kms:Decrypt
+                  Resource:
+                    Fn::Join:
+                    - ""
+                    -
+                      - "arn:aws:kms:"
+                      -
+                        Ref: "AWS::Region"
+                      - ":"
+                      -
+                        Ref: "AWS::AccountId"
+                      - ":key/CMK"
+
+  CodeTestDeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: "TrustPolicyAllowCodeBuildToAssume"
+            Effect: "Allow"
+            Principal:
+              Service:
+                - "codebuild.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AWSCodeBuildDeveloperAccess
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryPowerUser
+      Policies:
+        -
+          PolicyName: "AllowCloudWatchLogsForCodeBuild"
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              -
+                Action: logs:*
+                Effect: Allow
+                Resource:
+                  - arn:aws:logs:*:*:log-group:/aws/codebuild/*
+                  - arn:aws:logs:*:*:log-group:/aws/codebuild/*:*:*
+              -
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:PutObject
+                Resource:
+                  - !GetAtt CodeS3Bucket.Arn
+                  - Fn::Join:
+                      - ""
+                      -
+                        - !GetAtt CodeS3Bucket.Arn
+                        - "/*"
+        -
+          PolicyName: "WriteToDeploymentBuckets"
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              -
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:ListBucket
+                Resource:
+                  - Fn::Sub:
+                    - "arn:aws:s3:::${DeployBucket}"
+                    - DeployBucket:
+                        Fn::ImportValue: !Join [':', [!Ref TestStackName, 'BucketName']]
+                  - Fn::Sub:
+                    - "arn:aws:s3:::${DeployBucket}/*"
+                    - DeployBucket:
+                        Fn::ImportValue: !Join [':', [!Ref TestStackName, 'BucketName']]
+
+  CodeProdDeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: "TrustPolicyAllowCodeBuildToAssume"
+            Effect: "Allow"
+            Principal:
+              Service:
+                - "codebuild.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AWSCodeBuildDeveloperAccess
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryPowerUser
+        - !ImportValue ReadESUPolicy
+      Policies:
+        -
+          PolicyName: "AllowCloudWatchLogsForCodeBuild"
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              -
+                Action: logs:*
+                Effect: Allow
+                Resource:
+                  - arn:aws:logs:*:*:log-group:/aws/codebuild/*
+                  - arn:aws:logs:*:*:log-group:/aws/codebuild/*:*:*
+              -
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:PutObject
+                Resource:
+                  - !GetAtt CodeS3Bucket.Arn
+                  - Fn::Join:
+                      - ""
+                      -
+                        - !GetAtt CodeS3Bucket.Arn
+                        - "/*"
+        -
+          PolicyName: "WriteToDeploymentBuckets"
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              -
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:ListBucket
+                Resource:
+                  - Fn::Sub:
+                    - "arn:aws:s3:::${DeployBucket}"
+                    - DeployBucket:
+                        Fn::ImportValue: !Join [':', [!Ref ProdStackName, 'BucketName']]
+                  - Fn::Sub:
+                    - "arn:aws:s3:::${DeployBucket}/*"
+                    - DeployBucket:
+                        Fn::ImportValue: !Join [':', [!Ref ProdStackName, 'BucketName']]
+
+  CodePreDeploy:
+    Type: 'AWS::CodeBuild::Project'
+    Properties:
+      Name: !Sub '${AWS::StackName}-CodePreDeploy'
+      Description: 'Passes Source SHA through pipeline'
+      ServiceRole: !Ref CodeBuildRole
+      TimeoutInMinutes: 10
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: |
+          version: 0.2
+          phases:
+            build:
+              commands:
+                - printf $CODEBUILD_RESOLVED_SOURCE_VERSION > sha.txt
+          artifacts:
+            type: zip
+            files:
+              - sha.txt
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/ubuntu-base:14.04
+
+
+  CodeTestDeployer:
+    Type: 'AWS::CodeBuild::Project'
+    Properties:
+      Name: !Sub '${AWS::StackName}-CodeTestDeployer'
+      Description: 'Deploys built source web component to test bucket'
+      ServiceRole: !Ref CodeTestDeployRole
+      TimeoutInMinutes: 10
+      Source:
+        Type: CODEPIPELINE
+        # This buildspec will first empty the bucket, then copy all files into it
+        # This may be the only way to reliably sync the complete state of the
+        # files to the bucket. Multiple back to back invocations of the pipeline
+        # has caused new changes to fail to deploy when using aws s3 sync, possibly
+        # due to the eventual consistency nature of s3.
+        BuildSpec: config/deploy/test/buildspec.yml
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/ubuntu-base:14.04
+        EnvironmentVariables:
+          - Name: DEST_BUCKET
+            Value:
+              Fn::ImportValue: !Join [':', [!Ref TestStackName, 'BucketName']]
+
+  NewmanQABuilder:
+    Type: 'AWS::CodeBuild::Project'
+    Properties:
+      Name: !Sub '${AWS::StackName}-Newman'
+      Description: 'Run Newman Tests against Remix-test'
+      ServiceRole: !Ref CodeBuildRole
+      TimeoutInMinutes: 10
+      Source:
+        Type: CODEPIPELINE
+        GitCloneDepth: 1
+        BuildSpec: config/qa_newman_buildspec.yml
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/nodejs:10.1.0
+        EnvironmentVariables:
+          - Name: WebURL
+            Value:
+              Fn::ImportValue: !Join [':', [!Ref TestStackName, 'URL']]
+
+  CodeTestFirefox:
+    Type: 'AWS::CodeBuild::Project'
+    Properties:
+      Name: !Sub '${AWS::StackName}-CodeTestFirefox'
+      Description: 'Runs selenium tests for Firefox'
+      ServiceRole: !Ref CodeTestDeployRole
+      TimeoutInMinutes: 10
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: config/qa_firefox_selenium_buildspec.yml
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/ubuntu-base:14.04
+        EnvironmentVariables:
+          - Name: BaseURL
+            Value:
+              Fn::ImportValue: !Join [':', [!Ref TestStackName, 'URL']]
+
+  CodeTestChrome:
+    Type: 'AWS::CodeBuild::Project'
+    Properties:
+      Name: !Sub '${AWS::StackName}-CodeTestChrome'
+      Description: 'Runs selenium tests for Chrome'
+      ServiceRole: !Ref CodeTestDeployRole
+      TimeoutInMinutes: 10
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: config/qa_chrome_selenium_buildspec.yml
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/ubuntu-base:14.04
+        EnvironmentVariables:
+          - Name: BaseURL
+            Value:
+              Fn::ImportValue: !Join [':', [!Ref TestStackName, 'URL']]
+
+  CodeProdDeployer:
+    Type: 'AWS::CodeBuild::Project'
+    Properties:
+      Name: !Sub '${AWS::StackName}-CodeProdDeployer'
+      Description: 'Deploys built source web component to production bucket'
+      ServiceRole: !Ref CodeProdDeployRole
+      TimeoutInMinutes: 10
+      Source:
+        Type: CODEPIPELINE
+        # This buildspec will first empty the bucket, then copy all files into it
+        # This may be the only way to reliably sync the complete state of the
+        # files to the bucket. Multiple back to back invocations of the pipeline
+        # has caused new changes to fail to deploy when using aws s3 sync, possibly
+        # due to the eventual consistency nature of s3. See
+        # https://docs.aws.amazon.com/AmazonS3/latest/dev/Introduction.html#ConsistencyModel
+        BuildSpec: config/deploy/prod/buildspec.yml
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/ubuntu-base:14.04
+        EnvironmentVariables:
+          - Name: DEST_BUCKET
+            Value:
+              Fn::ImportValue: !Join [':', [!Ref ProdStackName, 'BucketName']]
+          - Name: OAUTH_TOKEN
+            Type: PARAMETER_STORE
+            Value: /esu/github/ndlib-git/oauth
+
+  PostDeployGitHub:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: add_github_status
+      Description: 'CodeBuild to tag the latest commit in repo post-deploy'
+      ServiceRole: !Ref CodeBuildRole
+      TimeoutInMinutes: 10
+      Source:
+        Type: CODEPIPELINE
+        GitCloneDepth: 1
+        BuildSpec: config/deploy/prod/postdeploy.yml
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/ubuntu-base:14.04
+        EnvironmentVariables:
+          - Name: OAUTH_TOKEN
+            Type: PARAMETER_STORE
+            Value: /esu/github/ndlib-git/oauth
+          - Name: API_URL
+            Value: !Sub "https://api.github.com/repos/${SourceRepoOwner}/${SourceRepoName}/statuses"
+          - Name: TARGET_URL
+            Value:
+              Fn::ImportValue: !Join [':', [!Ref ProdStackName, 'URL']]
+
+  CodeS3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+  CodePipelineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: "TrustPolicyAllowCodePipelineToAssume"
+            Effect: "Allow"
+            Principal:
+              Service:
+                - "codepipeline.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryPowerUser
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerServiceFullAccess
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role
+
+  CodePipelinePolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Description: "Policy to Allow CodePipeline to do its work"
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action: iam:PassRole
+            Resource: "*"
+          - Effect: Allow
+            Action:
+              - codepipeline:*
+              - sns:Publish
+            Resource: '*'
+          - Effect: Allow
+            Action:
+              - s3:PutObject
+              - s3:GetObject
+            Resource:
+              - !GetAtt CodeS3Bucket.Arn
+              - Fn::Join:
+                  - ""
+                  -
+                    - !GetAtt CodeS3Bucket.Arn
+                    - "/*"
+          - Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:GetObjectVersion
+              - s3:GetBucketVersioning
+            Resource: "*"
+          - Effect: Allow
+            Action:
+              - codebuild:StartBuild
+              - codebuild:BatchGetBuilds
+            Resource:
+              - !GetAtt CodeTestDeployer.Arn
+              - !GetAtt CodeProdDeployer.Arn
+              - !GetAtt CodeTestFirefox.Arn
+              - !GetAtt CodeTestChrome.Arn
+              - !GetAtt PostDeployGitHub.Arn
+              - !GetAtt CodePreDeploy.Arn
+              - !GetAtt NewmanQABuilder.Arn
+      Roles:
+        - !Ref CodePipelineRole
+
+  CodePipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      ArtifactStore:
+        Location: !Ref CodeS3Bucket
+        Type: S3
+      RoleArn: !GetAtt CodePipelineRole.Arn
+      Stages:
+        -
+          Name: Source
+          Actions:
+            -
+              Name: "RetrieveSourceCode"
+              ActionTypeId:
+                Owner: ThirdParty
+                Category: Source
+                Provider: GitHub
+                Version: "1"
+              Configuration:
+                Owner: !Ref SourceRepoOwner
+                Repo: !Ref SourceRepoName
+                Branch: !Ref CDBranchName
+                OAuthToken: !Ref OAuth
+              OutputArtifacts:
+                - Name: BuiltCode
+              RunOrder: 1
+            -
+              Name: "RetrieveConfigCode"
+              ActionTypeId:
+                Owner: ThirdParty
+                Category: Source
+                Provider: GitHub
+                Version: "1"
+              Configuration:
+                Owner: !Ref ConfigurationSourceRepoOwner
+                Repo: !Ref ConfigurationSourceRepoName
+                Branch: !Ref ConfigurationCDBranchName
+                OAuthToken: !Ref OAuth
+                PollForSourceChanges: false
+              OutputArtifacts:
+                - Name: ConfigCode
+              RunOrder: 1
+        -
+          Name: BuildAndDeployToTest
+          Actions:
+            - Name: "GetSha"
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Version: '1'
+                Provider: CodeBuild
+              InputArtifacts:
+              - Name: BuiltCode
+              - Name: ConfigCode
+              OutputArtifacts:
+              - Name: TestDeployOutput
+              Configuration:
+                ProjectName: !Ref CodePreDeploy
+                PrimarySource: BuiltCode
+              RunOrder: 1
+            - Name: "DeployToTest"
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Version: '1'
+                Provider: CodeBuild
+              InputArtifacts:
+              - Name: BuiltCode
+              - Name: ConfigCode
+              Configuration:
+                ProjectName: !Ref CodeTestDeployer
+                PrimarySource: ConfigCode
+              RunOrder: 1
+        -
+          Name: QA
+          Actions:
+            -
+              Name: "AutomatedFirefoxTest"
+              ActionTypeId:
+                Owner: AWS
+                Category: Test
+                Provider: CodeBuild
+                Version: "1"
+              InputArtifacts:
+                - Name: ConfigCode
+              Configuration:
+                ProjectName: !Ref CodeTestFirefox
+              RunOrder: 1
+            -
+              Name: "AutomatedChromeTest"
+              ActionTypeId:
+                Owner: AWS
+                Category: Test
+                Provider: CodeBuild
+                Version: "1"
+              InputArtifacts:
+                - Name: ConfigCode
+              Configuration:
+                ProjectName: !Ref CodeTestChrome
+              RunOrder: 1
+            -
+              Name: "AutomatedNewmanTest"
+              ActionTypeId:
+                Owner: AWS
+                Category: Test
+                Provider: CodeBuild
+                Version: "1"
+              InputArtifacts:
+                - Name: ConfigCode
+              Configuration:
+                ProjectName: !Ref NewmanQABuilder
+              RunOrder: 1
+            -
+              Name: "ManualApprovalOfTestEnvironment"
+              ActionTypeId:
+                Owner: AWS
+                Category: Approval
+                Provider: Manual
+                Version: "1"
+              Configuration:
+                NotificationArn: !Ref ApproversTopic
+                CustomData:
+                  Fn::Sub:
+                    - "You can review these changes at https://${TestURL}. Once approved, this will be deployed to https://${ProdURL}."
+                    - TestURL:
+                        Fn::ImportValue: !Join [':', [!Ref TestStackName, 'URL']]
+                      ProdURL:
+                        Fn::ImportValue: !Join [':', [!Ref ProdStackName, 'URL']]
+              RunOrder: 2
+        -
+          Name: DeployToProduction
+          Actions:
+            - Name: "DeployToProduction"
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Version: '1'
+                Provider: CodeBuild
+              InputArtifacts:
+                - Name: BuiltCode
+                - Name: ConfigCode
+              OutputArtifacts:
+                - Name: ProdDeployOutput
+              Configuration:
+                ProjectName: !Ref CodeProdDeployer
+                PrimarySource: ConfigCode
+              RunOrder: 1
+        -
+          Name: PostDeployActions
+          Actions:
+            - Name: "UpdateGitHubStatus"
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Version: '1'
+                Provider: CodeBuild
+              InputArtifacts:
+                - Name: ConfigCode
+                - Name: TestDeployOutput
+              Configuration:
+                ProjectName: !Ref PostDeployGitHub
+                PrimarySource: ConfigCode
+              RunOrder: 1

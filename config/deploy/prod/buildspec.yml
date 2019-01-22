@@ -1,0 +1,10 @@
+version: 0.2
+
+phases:
+  pre_build:
+    commands:
+      - aws s3 rm s3://$DEST_BUCKET --recursive
+  build:
+    commands:
+      - cd $CODEBUILD_SRC_DIR_BuiltCode
+      - aws s3 cp --recursive . s3://$DEST_BUCKET/ --exclude "./Jenkinsfile" --exclude "./README.md" --exclude "sha.txt"

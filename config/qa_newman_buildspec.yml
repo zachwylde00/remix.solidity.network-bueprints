@@ -1,0 +1,16 @@
+version: 0.2
+phases:
+  pre_build:
+    commands:
+      - echo Pre-build started on `date`
+      - npm install -g newman
+  build:
+    commands:
+      - echo Build started on `date`
+      - |
+        printf '{"name": "WebURL","values": [{"key": "WebURL","value": "%s","description": "This is the hostname to my environment","type": "text","enabled": true}],"_postman_variable_scope": "environment","_postman_exported_at": "2018-08-29T20:49:10.416Z","_postman_exported_using": "Postman/6.2.5"}' $WebURL >> test_env.json
+      - cat test_env.json
+      - newman run spec/remix.postman_collection.json -e test_env.json
+  post_build:
+    commands:
+      - echo Beginning post build on `date`

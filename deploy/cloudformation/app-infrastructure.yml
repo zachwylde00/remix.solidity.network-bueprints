@@ -1,0 +1,28 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: >
+  This CloudFormation will create the following:
+    - An S3 Bucket for Logging
+
+Resources:
+
+  LogBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      AccessControl: LogDeliveryWrite
+      VersioningConfiguration:
+        Status: Suspended
+      LifecycleConfiguration:
+        Rules:
+        - Status: Enabled
+          ExpirationInDays: 3653
+          NoncurrentVersionExpirationInDays: 1
+
+Outputs:
+
+  LogBucket:
+    Description: Bucket to put all logs into for this application
+    Value: !Ref LogBucket
+    Export:
+      Name: !Join [ ':', [ !Ref 'AWS::StackName', 'LogBucket']]

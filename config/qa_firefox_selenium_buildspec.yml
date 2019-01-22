@@ -1,0 +1,18 @@
+version: 0.2
+phases:
+  pre_build:
+    commands:
+      - echo Installing Dependencies
+      - apt-get update && apt-get -y install xvfb firefox
+      - pip install selenium
+  build:
+    commands:
+      - wget https://github.com/mozilla/geckodriver/releases/download/v0.23.0/geckodriver-v0.23.0-linux64.tar.gz
+      - tar -xvzf geckodriver*
+      - chmod +x geckodriver
+      - sudo mv geckodriver /usr/local/bin/
+      - chmod u+x ./spec/selenium/firefox_test.py
+      - python ./spec/selenium/firefox_test.py
+  post_build:
+    commands:
+      - echo Build completed on `date`
