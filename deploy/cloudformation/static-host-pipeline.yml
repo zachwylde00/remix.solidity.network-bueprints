@@ -433,7 +433,7 @@ Resources:
   PostDeployGitHub:
     Type: AWS::CodeBuild::Project
     Properties:
-      Name: add_github_status
+      Name: !Sub '${AWS::StackName}-Add-GitHub-Status'
       Description: 'CodeBuild to tag the latest commit in repo post-deploy'
       ServiceRole: !Ref CodeBuildRole
       TimeoutInMinutes: 10

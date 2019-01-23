@@ -11,19 +11,64 @@ Before you begin, check that you have the following:
 
 # Deploy
 
-### Remix Application Stack
+### Application Infrastructure Stack
 
 ```console
 aws cloudformation deploy \
-  --capabilities CAPABILITY_IAM \
-  --template-file deploy/cloudformation/remix-stack.yml \
-  --stack-name remix-dev \
+  --template-file deploy/cloudformation/app-infrastructure.yml \
+  --stack-name remix-app-infrastructure \
   --tags ProjectName=remix Name='testaccount-remix-dev' Contact='me@myhost.org' Owner='myid' \
     Description='brief-description-of-purpose'
-  --parameter-overrides OAuthToken=my_oauth_key \
-    RemixCertificateArn=arn-of-valid-cert \
-    FQDN=fqdn-of-service EnvType='dev'
 ```
 
+### Remix Pre-production Environment
+
+```console
+aws cloudformation deploy \
+ --template-file deploy/cloudformation/static-host.yml \
+ --capabilities CAPABILITY_IAM \
+ --stack-name remix-prep-service
+ --tags ProjectName=remix Name='testaccount-remix-prep' \
+    Contact='me@myhost.org' Owner='myid' \
+    Description='brief-description-of-purpose' \
+ --parameter-overrides EnvType='dev' FQDN='fqdn-prep.domain.com' \
+    AcmCertificateArn='arn-of-cert'
+```
+### Remix Production Environment
+
+```console
+aws cloudformation deploy \
+ --template-file deploy/cloudformation/static-host.yml \
+ --capabilities CAPABILITY_IAM \
+ --stack-name remix-prod-service
+ --tags ProjectName=remix Name='testaccount-remix-prod' \
+    Contact='me@myhost.org' Owner='myid' \
+    Description='brief-description-of-purpose' \
+ --parameter-overrides EnvType='dev' FQDN='fqdn-prod.domain.com' \
+    AcmCertificateArn='arn-of-cert'
+```
+
+### CI/CD Pipeline
+
+``` console
+aws cloudformation deploy \
+  --template-file deploy/cloudformation/static-host-pipeline \
+  --capabilities CAPABILITY_IAM \
+  --stack-name remix-pipeline
+  --tags ProjectName=remix Name='testaccount-remix-dev-pipeline' \
+     Contact='me@myhost.org' Owner='myid' \
+     Description='brief-description-of-purpose' \  
+  --parameter-overrides Approvers='approvers@myhost.com' \
+      SourceRepoOwner='RepoOwner' \
+      SourceRepoName='RepoWithSouceCode' \
+      CDBranchName='NameOfBranchToWatchForDeploy' \
+      ConfigurationSourceRepoOwner='ConfigRepoOwner' \
+      ConfigurationSourceRepoName='ConfigRepoName' \
+      ConfigurationCDBranchName='NameOfBranchThatHasConfig' \
+      OAuth='MyOAuthToken' \
+      ProdStackName='NameOfProdHostStack' \
+      TestStackName='NameOfTestHostStack'  
+```
 TODO:
 * [ ] Determine if Lambda should exist in this stack or live elsewhere for reusability.
+* [ ] Add enhanced monitoring to pipeline per /deploy/cloudformation/pipeline-monitoring.yml
